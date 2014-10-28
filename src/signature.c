@@ -155,8 +155,9 @@ int git_signature_default(git_signature **out, git_repository *repo)
 	return error;
 }
 
-int git_signature__parse(git_signature *sig, const char **buffer_out,
-		const char *buffer_end, const char *header, char ender)
+int git_signature__parse(
+	git_signature *sig, const char **buffer_out,
+	const char *buffer_end, const char *header, char ender)
 {
 	const char *buffer = *buffer_out;
 	const char *email_start, *email_end;
@@ -176,22 +177,55 @@ int git_signature__parse(git_signature *sig, const char **buffer_out,
 	}
 
 	email_start = git__memrchr(buffer, '<', buffer_end - buffer);
-	email_end = git__memrchr(buffer, '>', buffer_end - buffer);
+	if (!email_start) {
+		if (git_warn_invalid_data(
+				GIT_WARNING_INVALID_DATA__SIGNATURE_EMAIL_MISSING, -1,
+				buffer, (int)(buffer_end - buffer),
+				"missing signature %semail", header) < 0)
+			return signature_error("missing e-mail");
 
-	if (!email_start || !email_end || email_end <= email_start)
-		return signature_error("malformed e-mail");
+		/* just stop now with everything as name */
+		sig->name = extract_trimmed(buffer, buffer_end - buffer);
+		sig->email = git__strdup("");
+		*buffer_out = buffer_end + 1;
+		return 0;
+	}
 
+	sig->name = extract_trimmed(buffer, email_start - buffer);
 	email_start += 1;
-	sig->name = extract_trimmed(buffer, email_start - buffer - 1);
-	sig->email = extract_trimmed(email_start, email_end - email_start);
+
+	email_end = git__memrchr(email_start, '>', buffer_end - email_start);
+	if (!email_end) {
+		if (git_warn_invalid_data(
+				GIT_WARNING_INVALID_DATA__SIGNATURE_EMAIL_UNTERMINATED, -1,
+				email_start, (int)(buffer_end - email_start),
+				"unterminated signature %semail", header) < 0)
+			return signature_error("malformed e-mail");
+
+		sig->email = extract_trimmed(email_start, buffer_end - email_start);
+	} else {
+		sig->email = extract_trimmed(email_start, email_end - email_start);
+	}
 
 	/* Do we even have a time at the end of the signature? */
-	if (email_end + 2 < buffer_end) {
+	if (email_end != NULL && email_end + 2 < buffer_end) {
 		const char *time_start = email_end + 2;
 		const char *time_end;
 
-		if (git__strtol64(&sig->when.time, time_start, &time_end, 10) < 0)
-			return signature_error("invalid Unix timestamp");
+		if (git__strtol64(&sig->when.time, time_start, &time_end, 10) < 0) {
+			/* set timestamp to max value */
+			sig->when.time = (uint64_t)-1L;
+
+			/* skip over invalid timestamp data */
+			time_end = git__skip_over_to_space(time_start);
+
+			/* warn (and return error if requested) */
+			if (git_warn_invalid_data(
+					GIT_WARNING_INVALID_DATA__SIGNATURE_TIMESTAMP, 0,
+					time_start, (int)(time_end - time_start),
+					"invalid signature %stimestamp", header) < 0)
+				return signature_error("invalid Unix timestamp");
+		}
 
 		/* do we have a timezone? */
 		if (time_end + 1 < buffer_end) {
@@ -202,8 +236,19 @@ int git_signature__parse(git_signature *sig, const char **buffer_out,
 
 			if ((tz_start[0] != '-' && tz_start[0] != '+') ||
 				git__strtol32(&offset, tz_start + 1, &tz_end, 10) < 0) {
-				//malformed timezone, just assume it's zero
+
+				/* set offset to inoffensive value */
 				offset = 0;
+
+				/* skip over invalid offset data */
+				tz_end = git__skip_over_to_space(tz_start);
+
+				/* warn (and return error if requested) */
+				if (git_warn_invalid_data(
+						GIT_WARNING_INVALID_DATA__SIGNATURE_TIMEZONE, 0,
+						tz_start, (int)(tz_end - tz_start),
+						"invalid timezone in signature %s", header) < 0)
+					return signature_error("invalid timezone");
 			}
 
 			hours = offset / 100;

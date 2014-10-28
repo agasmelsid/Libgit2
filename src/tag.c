@@ -136,7 +136,7 @@ static int tag_parse(git_tag *tag, const char *buffer, const char *buffer_end)
 
 	tag->message = NULL;
 	if (buffer < buffer_end) {
-		if( *buffer != '\n' )
+		if (*buffer != '\n')
 			return tag_error("No new line before message");
 
 		text_len = buffer_end - ++buffer;

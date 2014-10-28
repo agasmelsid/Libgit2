@@ -1513,7 +1513,7 @@ static int refdb_reflog_fs__read(git_reflog **out, git_refdb_backend *_backend, 
 	if ((error == GIT_ENOTFOUND) &&
 		((error = create_new_reflog_file(git_buf_cstr(&log_path))) < 0))
 		goto cleanup;
- 
+
 	if ((error = reflog_parse(log,
 		git_buf_cstr(&log_file), git_buf_len(&log_file))) < 0)
 		goto cleanup;
