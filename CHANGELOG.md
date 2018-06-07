@@ -119,6 +119,12 @@ v0.27
 * New family of functions to allow parsing message trailers. This API is still
   experimental and may change in future releases.
 
+* `git_signature_author_env()` lets you create a signature from the
+   `GIT_AUTHOR_NAME` and `GIT_AUTHOR_EMAIL` environment variables.
+
+* `git_signature_committer_env()` lets you create a signature from the
+  `GIT_COMMITTER_NAME` and `GIT_COMMITTER_EMAIL` environment variables.
+
 ### API removals
 
 ### Breaking API changes

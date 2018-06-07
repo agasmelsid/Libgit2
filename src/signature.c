@@ -195,6 +195,79 @@ int git_signature_default(git_signature **out, git_repository *repo)
 	return error;
 }
 
+static const char* get_val_from_env_or_cfg(
+	int *error,
+	const char *env_key, git_buf env_buf,
+	const char *cfg_key, const git_config *cfg_obj,
+	const char *alt_env_key)
+{
+	const char *val;
+
+	if (!(*error = git__getenv(&env_buf, env_key)))
+		return env_buf.ptr;
+
+	if ((GIT_ENOTFOUND == *error) &&
+		!(*error = git_config_get_string(&val, cfg_obj, cfg_key)))
+		return val;
+
+	if ((GIT_ENOTFOUND == *error) &&
+		alt_env_key &&
+		!(*error = git__getenv(&env_buf, alt_env_key)))
+		return env_buf.ptr;
+
+	return NULL;
+}
+
+static int git_signature_name_email_from_env_or_cfg(git_signature **out, git_config *cfg,
+		const char *name_env, const char *email_env)
+{
+	int error;
+
+	git_buf buf_name = GIT_BUF_INIT;
+	git_buf buf_email = GIT_BUF_INIT;
+
+	const char *user_name = get_val_from_env_or_cfg(&error,
+		name_env, buf_name, "user.name", cfg, NULL);
+	const char *user_email = get_val_from_env_or_cfg(&error,
+		email_env, buf_email, "user.email", cfg, "EMAIL");
+
+	if (user_name && user_email)
+		error = git_signature_now(out, user_name, user_email);
+
+	git_buf_free(&buf_email);
+	git_buf_free(&buf_name);
+
+	return error;
+}
+
+static int git_signature_name_email_from_env(git_signature **out, git_repository *repo,
+		const char *name_env, const char *email_env)
+{
+	int error;
+	git_config *cfg;
+
+	if ((error = git_repository_config_snapshot(&cfg, repo)) < 0)
+		return error;
+	else
+		error = git_signature_name_email_from_env_or_cfg(out,
+			cfg, name_env, email_env);
+
+	git_config_free(cfg);
+	return error;
+}
+
+int git_signature_author_env(git_signature **out, git_repository *repo)
+{
+	return git_signature_name_email_from_env(out, repo,
+		"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL");
+}
+
+int git_signature_committer_env(git_signature **out, git_repository *repo)
+{
+	return git_signature_name_email_from_env(out, repo,
+		"GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL");
+}
+
 int git_signature__parse(git_signature *sig, const char **buffer_out,
 		const char *buffer_end, const char *header, char ender)
 {

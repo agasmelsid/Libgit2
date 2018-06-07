@@ -746,7 +746,10 @@ void test_repo_init__can_reinit_an_initialized_repository(void)
 	git_repository_free(reinit);
 }
 
-void test_repo_init__init_with_initial_commit(void)
+static void impl_test_repo_init__init_with_initial_commit(
+	const char *cfg_user_name, const char* cfg_user_email,
+	const char *env_author_name, const char *env_author_email,
+	int (*git_signature_func)(git_signature **out, git_repository *repo))
 {
 	git_index *index;
 
@@ -784,19 +787,26 @@ void test_repo_init__init_with_initial_commit(void)
 		git_config *cfg, *local;
 		cl_git_pass(git_repository_config(&cfg, _repo));
 		cl_git_pass(git_config_open_level(&local, cfg, GIT_CONFIG_LEVEL_LOCAL));
-		cl_git_pass(git_config_set_string(local, "user.name", "Test User"));
-		cl_git_pass(git_config_set_string(local, "user.email", "t@example.com"));
+		if (cfg_user_name)
+			cl_git_pass(git_config_set_string(local, "user.name", cfg_user_name));
+		if (cfg_user_email)
+			cl_git_pass(git_config_set_string(local, "user.email", cfg_user_email));
 		git_config_free(local);
 		git_config_free(cfg);
 	}
 
 	/* Create a commit with the new contents of the index */
 	{
+		int sig_name_matches, sig_email_matches;
 		git_signature *sig;
 		git_oid tree_id, commit_id;
 		git_tree *tree;
 
-		cl_git_pass(git_signature_default(&sig, _repo));
+		cl_git_pass(git_signature_func(&sig, _repo));
+
+		sig_name_matches = !strcmp(sig->name, (env_author_name ? env_author_name : cfg_user_name));
+		sig_email_matches = !strcmp(sig->email, (env_author_email ? env_author_email : cfg_user_email));
+
 		cl_git_pass(git_index_write_tree(&tree_id, index));
 		cl_git_pass(git_tree_lookup(&tree, _repo, &tree_id));
 
@@ -806,9 +816,94 @@ void test_repo_init__init_with_initial_commit(void)
 
 		git_tree_free(tree);
 		git_signature_free(sig);
+		cl_assert(sig_name_matches);
+		cl_assert(sig_email_matches);
 	}
 
 	git_index_free(index);
+}
+
+void test_repo_init__init_with_initial_commit(void)
+{
+	const char *user_name = "Test User";
+	const char *user_email = "t@example.com";
+
+	impl_test_repo_init__init_with_initial_commit(user_name, user_email,
+		NULL, NULL, git_signature_default);
+}
+
+void test_repo_init__init_with_initial_commit_with_env_author_name_only(void)
+{
+	const char *user_name = "Test User";
+	const char *user_email = "t@example.com";
+	const char *author_name = "Test User (From Environment)";
+
+	cl_git_pass(cl_setenv("GIT_AUTHOR_NAME", author_name));
+
+	impl_test_repo_init__init_with_initial_commit(user_name, user_email,
+		author_name, NULL, git_signature_author_env);
+
+	cl_git_pass(cl_setenv("GIT_AUTHOR_NAME", NULL));
+}
+
+void test_repo_init__init_with_initial_commit_with_env_author_email_only(void)
+{
+	const char *user_name = "Test User";
+	const char *user_email = "t@example.com";
+	const char *author_email = "email@from.environment.com";
+
+	cl_git_pass(cl_setenv("GIT_AUTHOR_EMAIL", author_email));
+
+	impl_test_repo_init__init_with_initial_commit(user_name, user_email,
+		NULL, author_email, git_signature_author_env);
+
+	cl_git_pass(cl_setenv("GIT_AUTHOR_EMAIL", NULL));
+}
+
+static void impl_test_repo_init__init_with_initial_commit_with_env_name_and_email(
+	const char *env_name_key, const char *env_email_key,
+	int (*git_signature_func)(git_signature **out, git_repository *repo))
+{
+	const char *user_name = "Test User";
+	const char *user_email = "t@example.com";
+	const char *env_name_val = "Test User (From Environment)";
+	const char *env_email_val = "email@from.environment.com";
+
+	cl_git_pass(cl_setenv(env_name_key, env_name_val));
+	cl_git_pass(cl_setenv(env_email_key, env_email_val));
+
+	impl_test_repo_init__init_with_initial_commit(user_name, user_email,
+		env_name_val, env_email_val, git_signature_func);
+
+	cl_git_pass(cl_setenv(env_name_key, NULL));
+	cl_git_pass(cl_setenv(env_email_key, NULL));
+}
+
+void test_repo_init__init_with_initial_commit_with_env_author_name_and_email(void)
+{
+	impl_test_repo_init__init_with_initial_commit_with_env_name_and_email(
+		"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL",
+		git_signature_author_env);
+}
+
+void test_repo_init__init_with_initial_commit_with_env_committer_name_and_email(void)
+{
+	impl_test_repo_init__init_with_initial_commit_with_env_name_and_email(
+		"GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL",
+		git_signature_committer_env);
+}
+
+void test_repo_init__init_with_initial_commit_with_env_email_only(void)
+{
+	const char *user_name = "Test User";
+	const char *email = "non.git.email@from.environment.com";
+
+	cl_git_pass(cl_setenv("EMAIL", email));
+
+	impl_test_repo_init__init_with_initial_commit(user_name, NULL,
+		NULL, email, git_signature_author_env);
+
+	cl_git_pass(cl_setenv("EMAIL", NULL));
 }
 
 void test_repo_init__at_filesystem_root(void)
