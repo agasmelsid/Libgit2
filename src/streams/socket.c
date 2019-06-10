@@ -74,7 +74,7 @@ static int socket_connect(git_stream *stream)
 	struct addrinfo *info = NULL, *p;
 	struct addrinfo hints;
 	git_socket_stream *st = (git_socket_stream *) stream;
-	GIT_SOCKET s = INVALID_SOCKET;
+	GIT_SOCKET s = st->s;
 	int ret;
 
 #ifdef GIT_WIN32
@@ -94,28 +94,31 @@ static int socket_connect(git_stream *stream)
 	}
 #endif
 
-	memset(&hints, 0x0, sizeof(struct addrinfo));
-	hints.ai_socktype = SOCK_STREAM;
-	hints.ai_family = AF_UNSPEC;
+	if (s == INVALID_SOCKET) {
+		memset(&hints, 0x0, sizeof(struct addrinfo));
+		hints.ai_socktype = SOCK_STREAM;
+		hints.ai_family = AF_UNSPEC;
 
-	if ((ret = p_getaddrinfo(st->host, st->port, &hints, &info)) != 0) {
-		git_error_set(GIT_ERROR_NET,
-			   "failed to resolve address for %s: %s", st->host, p_gai_strerror(ret));
-		return -1;
-	}
+		/* Attempt to connect to the host and port */
+		if ((ret = p_getaddrinfo(st->host, st->port, &hints, &info)) != 0) {
+			giterr_set(GITERR_NET,
+				   "failed to resolve address for %s: %s", st->host, p_gai_strerror(ret));
+			return -1;
+		}
 
-	for (p = info; p != NULL; p = p->ai_next) {
-		s = socket(p->ai_family, p->ai_socktype | SOCK_CLOEXEC, p->ai_protocol);
+		for (p = info; p != NULL; p = p->ai_next) {
+			s = socket(p->ai_family, p->ai_socktype | SOCK_CLOEXEC, p->ai_protocol);
 
-		if (s == INVALID_SOCKET)
-			continue;
+			if (s == INVALID_SOCKET)
+				continue;
 
-		if (connect(s, p->ai_addr, (socklen_t)p->ai_addrlen) == 0)
-			break;
+			if (connect(s, p->ai_addr, (socklen_t)p->ai_addrlen) == 0)
+				break;
 
-		/* If we can't connect, try the next one */
-		close_socket(s);
-		s = INVALID_SOCKET;
+			/* If we can't connect, try the next one */
+			close_socket(s);
+			s = INVALID_SOCKET;
+		}
 	}
 
 	/* Oops, we couldn't connect to any address */
@@ -181,6 +184,11 @@ static int default_socket_stream_new(
 	const char *host,
 	const char *port)
 {
+	return git_socket_stream_new_native(out, host, port, INVALID_SOCKET);
+}
+
+int git_socket_stream_new_native(git_stream **out, const char *host, const char *port, GIT_SOCKET s)
+{
 	git_socket_stream *st;
 
 	assert(out && host && port);
@@ -202,7 +210,7 @@ static int default_socket_stream_new(
 	st->parent.read = socket_read;
 	st->parent.close = socket_close;
 	st->parent.free = socket_free;
-	st->s = INVALID_SOCKET;
+	st->s = s;
 
 	*out = (git_stream *) st;
 	return 0;
