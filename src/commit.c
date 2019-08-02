@@ -12,6 +12,7 @@
 #include "git2/repository.h"
 #include "git2/signature.h"
 #include "git2/mailmap.h"
+#include "git2/index.h"
 #include "git2/sys/commit.h"
 
 #include "odb.h"
@@ -40,36 +41,30 @@ void git_commit__free(void *_commit)
 	git__free(commit);
 }
 
-static int git_commit__create_buffer_internal(
-	git_buf *out,
-	const git_signature *author,
-	const git_signature *committer,
-	const char *message_encoding,
-	const char *message,
-	const git_oid *tree,
-	git_array_oid_t *parents)
+int git_commit_desc_write_buffer(git_buf *out,
+	const git_commit_descriptor *desc)
 {
 	size_t i = 0;
-	const git_oid *parent;
 
-	assert(out && tree);
+	assert(out && desc);
 
-	git_oid__writebuf(out, "tree ", tree);
+	GIT_ERROR_CHECK_VERSION(desc, GIT_COMMIT_DESCRIPTOR_VERSION, "git_commit_descriptor");
 
-	for (i = 0; i < git_array_size(*parents); i++) {
-		parent = git_array_get(*parents, i);
-		git_oid__writebuf(out, "parent ", parent);
+	git_oid__writebuf(out, "tree ", desc->tree);
+
+	for (i = 0; i < desc->parents.count; i++) {
+		git_oid__writebuf(out, "parent ", &desc->parents.ids[i]);
 	}
 
-	git_signature__writebuf(out, "author ", author);
-	git_signature__writebuf(out, "committer ", committer);
+	git_signature__writebuf(out, "author ", desc->author);
+	git_signature__writebuf(out, "committer ", desc->committer);
 
-	if (message_encoding != NULL)
-		git_buf_printf(out, "encoding %s\n", message_encoding);
+	if (desc->message_encoding != NULL)
+		git_buf_printf(out, "encoding %s\n", desc->message_encoding);
 
 	git_buf_putc(out, '\n');
 
-	if (git_buf_puts(out, message) < 0)
+	if (git_buf_puts(out, desc->message) < 0)
 		goto on_error;
 
 	return 0;
@@ -79,17 +74,14 @@ on_error:
 	return -1;
 }
 
-static int validate_tree_and_parents(git_array_oid_t *parents, git_repository *repo, const git_oid *tree,
-				     git_commit_parent_callback parent_cb, void *parent_payload,
-				     const git_oid *current_id, bool validate)
+static collect_parents(git_oidarray *out_parents, git_repository *repo,
+	git_commit_parent_callback parent_cb, void *parent_payload, bool validate)
 {
 	size_t i;
 	int error;
 	git_oid *parent_cpy;
 	const git_oid *parent;
-
-	if (validate && !git_object__is_valid(repo, tree, GIT_OBJECT_TREE))
-		return -1;
+	git_array_oid_t parents = GIT_ARRAY_INIT;
 
 	i = 0;
 	while ((parent = parent_cb(i, parent_payload)) != NULL) {
@@ -98,23 +90,102 @@ static int validate_tree_and_parents(git_array_oid_t *parents, git_repository *r
 			goto on_error;
 		}
 
-		parent_cpy = git_array_alloc(*parents);
+		parent_cpy = git_array_alloc(parents);
 		GIT_ERROR_CHECK_ALLOC(parent_cpy);
 
 		git_oid_cpy(parent_cpy, parent);
 		i++;
 	}
 
-	if (current_id && (parents->size == 0 || git_oid_cmp(current_id, git_array_get(*parents, 0)))) {
-		git_error_set(GIT_ERROR_OBJECT, "failed to create commit: current tip is not the first parent");
-		error = GIT_EMODIFIED;
-		goto on_error;
-	}
+	git_oidarray__from_array(out_parents, &parents);
 
 	return 0;
 
 on_error:
-	git_array_clear(*parents);
+	git_array_clear(parents);
+	return error;
+}
+
+static int validate_tree_and_parents(git_oidarray *out_parents, git_repository *repo, const git_oid *tree,
+				     git_commit_parent_callback parent_cb, void *parent_payload,
+				     const git_oid *current_id, bool validate)
+{
+	int error;
+	git_oidarray parents;
+
+	if (validate && !git_object__is_valid(repo, tree, GIT_OBJECT_TREE))
+		return -1;
+
+	if ((error = collect_parents(&parents, repo, parent_cb, parent_payload, validate)) < 0)
+		return error;
+
+	if (current_id && (parents.count == 0 || git_oid_cmp(current_id, &parents.ids[0]))) {
+		git_error_set(GIT_ERROR_OBJECT, "failed to create commit: current tip is not the first parent");
+		return GIT_EMODIFIED;
+	}
+
+	*out_parents = parents;
+	return 0;
+}
+
+int git_commit_desc_write_object(git_oid *out_oid,
+	git_repository *repo,
+	const git_commit_descriptor *given_desc,
+	const git_commit_desc_options *opts)
+{
+	int error;
+	git_odb *odb;
+	git_reference *ref = NULL;
+	git_buf buf = GIT_BUF_INIT;
+	const git_oid *current_id = NULL;
+	git_oidarray parents;
+	bool validate = (opts ? (opts->flags & GIT_COMMIT_BUILDER_VALIDATE) : git_object__strict_input_validation);
+	git_commit_descriptor *desc = (git_commit_descriptor *)given_desc;
+
+	assert(repo && given_desc);
+
+	if (opts)
+		GIT_ERROR_CHECK_VERSION(opts, GIT_COMMIT_DESC_OPTIONS_VERSION, "git_commit_desc_options");
+
+	if (opts && opts->update_ref) {
+		error = git_reference_lookup_resolved(&ref, repo, opts->update_ref, 10);
+		if (error < 0 && error != GIT_ENOTFOUND)
+			return error;
+	}
+	git_error_clear();
+
+	if (ref)
+		current_id = git_reference_target(ref);
+
+	if ((error = validate_tree_and_parents(&parents, repo, desc->tree,
+		opts->parent_cb, opts->parent_payload, current_id, validate)) < 0)
+		goto cleanup;
+
+	desc->parents = parents;
+
+	error = git_commit_desc_write_buffer(&buf, desc);
+	if (error < 0)
+		goto cleanup;
+
+	if (git_repository_odb__weakptr(&odb, repo) < 0)
+		goto cleanup;
+
+	if (git_odb__freshen(odb, desc->tree) < 0)
+		goto cleanup;
+
+	if (git_odb_write(out_oid, odb, buf.ptr, buf.size, GIT_OBJECT_COMMIT) < 0)
+		goto cleanup;
+
+	if (ref) {
+		error = git_reference__update_for_commit(
+			repo, ref, opts->update_ref, out_oid, "commit");
+		goto cleanup;
+	}
+
+cleanup:
+	git_oidarray_free(&parents);
+	git_reference_free(ref);
+	git_buf_dispose(&buf);
 	return error;
 }
 
@@ -131,54 +202,22 @@ static int git_commit__create_internal(
 	void *parent_payload,
 	bool validate)
 {
-	int error;
-	git_odb *odb;
-	git_reference *ref = NULL;
-	git_buf buf = GIT_BUF_INIT;
-	const git_oid *current_id = NULL;
-	git_array_oid_t parents = GIT_ARRAY_INIT;
+	git_commit_descriptor desc = GIT_COMMIT_DESCRIPTOR_INIT;
+	git_commit_desc_options opts = GIT_COMMIT_DESC_OPTIONS_INIT;
 
-	if (update_ref) {
-		error = git_reference_lookup_resolved(&ref, repo, update_ref, 10);
-		if (error < 0 && error != GIT_ENOTFOUND)
-			return error;
-	}
-	git_error_clear();
+	desc.tree = tree;
+	desc.author = author;
+	desc.committer = committer;
+	desc.message = message;
+	desc.message_encoding = message_encoding;
 
-	if (ref)
-		current_id = git_reference_target(ref);
+	if (validate)
+		opts.flags |= GIT_COMMIT_BUILDER_VALIDATE;
+	opts.parent_cb = parent_cb;
+	opts.parent_payload = parent_payload;
+	opts.update_ref = update_ref;
 
-	if ((error = validate_tree_and_parents(&parents, repo, tree, parent_cb, parent_payload, current_id, validate)) < 0)
-		goto cleanup;
-
-	error = git_commit__create_buffer_internal(&buf, author, committer,
-						   message_encoding, message, tree,
-						   &parents);
-
-	if (error < 0)
-		goto cleanup;
-
-	if (git_repository_odb__weakptr(&odb, repo) < 0)
-		goto cleanup;
-
-	if (git_odb__freshen(odb, tree) < 0)
-		goto cleanup;
-
-	if (git_odb_write(id, odb, buf.ptr, buf.size, GIT_OBJECT_COMMIT) < 0)
-		goto cleanup;
-
-
-	if (update_ref != NULL) {
-		error = git_reference__update_for_commit(
-			repo, ref, update_ref, id, "commit");
-		goto cleanup;
-	}
-
-cleanup:
-	git_array_clear(parents);
-	git_reference_free(ref);
-	git_buf_dispose(&buf);
-	return error;
+	return git_commit_desc_write_object(id, repo, &desc, &opts);
 }
 
 int git_commit_create_from_callback(
@@ -313,6 +352,60 @@ int git_commit_create(
 		commit_parent_from_array, &data, false);
 }
 
+int git_commit_create_on(
+	git_oid *id,
+	git_repository *repo,
+	const char *update_ref,
+	const git_signature *author,
+	const git_signature *committer,
+	const char *message_encoding,
+	const char *message,
+	const git_tree *tree,
+	size_t parent_count,
+	const git_commit *parents[])
+{
+	commit_parent_data data = { parent_count, parents, repo };
+
+	assert(tree && git_tree_owner(tree) == repo);
+
+	return git_commit__create_internal(
+		id, repo, update_ref, author, committer,
+		message_encoding, message, git_tree_id(tree),
+		commit_parent_from_array, &data, false);
+}
+
+int git_commit_create_on_head(
+	git_oid *id,
+	git_repository *repo,
+	const git_signature *author,
+	const git_signature *committer,
+	const char *message_encoding,
+	const char *message,
+	const git_tree *tree,
+	size_t parent_count,
+	const git_commit *parents[])
+{
+	return git_commit_create_on(id, repo, GIT_HEAD_FILE,
+				    author, committer, message_encoding, message,
+				    tree, parent_count, parents);
+}
+
+int git_commit_create_ext(
+	git_oid *id,
+	git_repository *repo,
+	const git_signature *author,
+	const git_signature *committer,
+	const char *message_encoding,
+	const char *message,
+	const git_tree *tree,
+	size_t parent_count,
+	const git_commit *parents[])
+{
+	return git_commit_create_on(id, repo, NULL,
+				    author, committer, message_encoding, message,
+				    tree, parent_count, parents);
+}
+
 static const git_oid *commit_parent_for_amend(size_t curr, void *payload)
 {
 	const git_commit *commit_to_amend = payload;
@@ -381,6 +474,113 @@ int git_commit_amend(
 	}
 
 	return error;
+}
+
+static int insert_commit(git_vector *v, git_repository *repo, const git_oid *id)
+{
+	int error;
+	git_commit *commit;
+
+	if ((error = git_commit_lookup(&commit, repo, id)) < 0)
+		return error;
+
+	if ((error = git_vector_insert(v, commit)) < 0) {
+		git_commit_free(commit);
+		return error;
+	}
+
+	return 0;
+}
+
+struct mergehead_data {
+	git_repository *repo;
+	git_vector *commits;
+};
+
+int gather_commit_ids(const git_oid *id, void *payload)
+{
+	struct mergehead_data *data = (struct mergehead_data *) payload;
+
+	return insert_commit(data->commits, data->repo, id);
+}
+
+static int commit_fromstate(
+	git_oid *id,
+	git_repository *repo,
+	const char *update_ref,
+	const git_signature *author,
+	const git_signature *committer,
+	const char *message_encoding,
+	const char *message)
+{
+	int error;
+	size_t i;
+	git_tree *tree = NULL;
+	git_index *index = NULL;
+	git_oid current_id, tree_id;
+	git_commit *commit;
+	git_vector commits = GIT_VECTOR_INIT;
+	git_repository_state_t state;
+
+	state = git_repository_state(repo);
+
+	if ((error = git_reference_name_to_id(&current_id, repo, GIT_HEAD_FILE)) < 0)
+		return error;
+
+	if ((error = insert_commit(&commits, repo, &current_id)) < 0)
+		goto cleanup;
+
+	if (state == GIT_REPOSITORY_STATE_MERGE) {
+		struct mergehead_data mergehead_data = { repo, &commits };
+
+		if ((error = git_repository_mergehead_foreach(repo, gather_commit_ids, &mergehead_data)) < 0)
+			goto cleanup;
+	}
+
+	if ((error = git_repository_index(&index, repo)) < 0)
+		goto cleanup;
+
+	error = git_index_write_tree(&tree_id, index);
+	git_index_free(index);
+	if (error < 0)
+		goto cleanup;
+
+	if ((error = git_tree_lookup(&tree, repo, &tree_id)) < 0)
+		goto cleanup;
+
+	error = git_commit_create_on(id, repo, update_ref,
+				     author, committer, message_encoding, message,
+				     tree, commits.length, (const git_commit **) commits.contents);
+
+cleanup:
+	git_tree_free(tree);
+	git_vector_foreach(&commits, i, commit) {
+		git_commit_free(commit);
+	}
+	git_vector_free(&commits);
+	return 0;
+}
+
+int git_commit_create_fromstate(
+	git_oid *id,
+	git_repository *repo,
+	const git_signature *author,
+	const git_signature *committer,
+	const char *message_encoding,
+	const char *message)
+{
+	return commit_fromstate(id, repo, NULL, author, committer, message_encoding, message);
+}
+
+int git_commit_create_fromstate_on_head(
+	git_oid *id,
+	git_repository *repo,
+	const git_signature *author,
+	const git_signature *committer,
+	const char *message_encoding,
+	const char *message)
+{
+	return commit_fromstate(id, repo, GIT_HEAD_FILE, author, committer, message_encoding, message);
 }
 
 int git_commit__parse_raw(void *_commit, const char *data, size_t size)
@@ -815,22 +1015,27 @@ int git_commit_create_buffer(git_buf *out,
 {
 	int error;
 	commit_parent_data data = { parent_count, parents, repo };
-	git_array_oid_t parents_arr = GIT_ARRAY_INIT;
+	git_commit_descriptor desc = GIT_COMMIT_DESCRIPTOR_INIT;
+	git_oidarray parents_ary;
 	const git_oid *tree_id;
 
 	assert(tree && git_tree_owner(tree) == repo);
 
 	tree_id = git_tree_id(tree);
 
-	if ((error = validate_tree_and_parents(&parents_arr, repo, tree_id, commit_parent_from_array, &data, NULL, true)) < 0)
+	if ((error = validate_tree_and_parents(&parents_ary, repo, tree_id, commit_parent_from_array, &data, NULL, true)) < 0)
 		return error;
 
-	error = git_commit__create_buffer_internal(
-		out, author, committer,
-		message_encoding, message, tree_id,
-		&parents_arr);
+	desc.tree = tree_id;
+	desc.author = author;
+	desc.committer = committer;
+	desc.message = message;
+	desc.message_encoding = message_encoding;
+	desc.parents = parents_ary;
 
-	git_array_clear(parents_arr);
+	error = git_commit_desc_write_buffer(out, &desc);
+
+	git_oidarray_free(&parents_ary);
 	return error;
 }
 
