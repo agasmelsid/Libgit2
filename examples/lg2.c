@@ -11,7 +11,10 @@ struct {
 	char requires_repo;
 } commands[] = {
 	{ "add",          lg2_add,          1 },
+	{ "apply",        lg2_apply,        1 },
+	{ "rm",           lg2_add,          1 },
 	{ "blame",        lg2_blame,        1 },
+	{ "branch",       lg2_branch,       1 },
 	{ "cat-file",     lg2_cat_file,     1 },
 	{ "checkout",     lg2_checkout,     1 },
 	{ "clone",        lg2_clone,        0 },
@@ -21,20 +24,28 @@ struct {
 	{ "diff",         lg2_diff,         1 },
 	{ "fetch",        lg2_fetch,        1 },
 	{ "for-each-ref", lg2_for_each_ref, 1 },
-	{ "general",      lg2_general,      0 },
+// Uncomment to test the general example. Hidden
+// because, while an important example, it doesn't
+// make sense for general use.
+//	{ "general",      lg2_general,      0 },
 	{ "index-pack",   lg2_index_pack,   1 },
 	{ "init",         lg2_init,         0 },
 	{ "log",          lg2_log,          1 },
 	{ "ls-files",     lg2_ls_files,     1 },
 	{ "ls-remote",    lg2_ls_remote,    1 },
 	{ "merge",        lg2_merge,        1 },
-	{ "push",         lg2_push,        1  },
+	{ "push",         lg2_push,         1 },
+	{ "pull",         lg2_pull,         1 },
+	{ "rebase",       lg2_rebase,       1 },
 	{ "remote",       lg2_remote,       1 },
+	{ "reset",        lg2_reset,        1 },
 	{ "rev-list",     lg2_rev_list,     1 },
 	{ "rev-parse",    lg2_rev_parse,    1 },
 	{ "show-index",   lg2_show_index,   0 },
+	{ "self-test",    lg2_interactive_tests, 0 },
 	{ "stash",        lg2_stash,        1 },
 	{ "status",       lg2_status,       1 },
+	{ "submodule",    lg2_submodule,    1 },
 	{ "tag",          lg2_tag,          1 },
 };
 
@@ -45,10 +56,11 @@ static int run_command(git_command_fn fn, git_repository *repo, struct args_info
 	/* Run the command. If something goes wrong, print the error message to stderr */
 	error = fn(repo, args.argc - args.pos, &args.argv[args.pos]);
 	if (error < 0) {
-		if (git_error_last() == NULL)
-			fprintf(stderr, "Error without message");
-		else
+		if (git_error_last() == NULL) {
+			fprintf(stderr, "Warning: An error occurred!\n");
+		} else {
 			fprintf(stderr, "Bad news:\n %s\n", git_error_last()->message);
+		}
 	}
 
 	return !!error;
@@ -72,6 +84,9 @@ int main(int argc, char **argv)
 	const char *git_dir = NULL;
 	int return_code = 1;
 	size_t i;
+
+	if (test_path_lib())
+		fprintf(stderr, "Warning: Path library failed tests.\n");
 
 	if (argc < 2)
 		usage(argv[0]);

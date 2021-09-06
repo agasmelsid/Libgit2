@@ -54,20 +54,25 @@ static int transfer_progress_cb(const git_indexer_progress *stats, void *payload
 }
 
 /** Entry point for this command */
-int lg2_fetch(git_repository *repo, int argc, char **argv)
+int lg2_pull(git_repository *repo, int argc, char **argv)
 {
 	git_remote *remote = NULL;
 	const git_indexer_progress *stats;
 	git_fetch_options fetch_opts = GIT_FETCH_OPTIONS_INIT;
 
-	if (argc < 2) {
-		fprintf(stderr, "usage: %s fetch <repo>\n", argv[-1]);
+	char *origin = "origin";
+	char *argv_merge[2];
+
+	if (argc == 2) {
+		origin = argv[1];
+	} else if (argc > 2) {
+		fprintf(stderr, "usage: %s pull [remote]\n", argv[-1]);
 		return EXIT_FAILURE;
 	}
 
 	/* Figure out whether it's a named remote or a URL */
-	printf("Fetching %s for repo %p\n", argv[1], repo);
-	if (git_remote_lookup(&remote, repo, argv[1]) < 0)
+	printf("Fetching %s for repo %p\n", origin, repo);
+	if (git_remote_lookup(&remote, repo, origin) < 0)
 		if (git_remote_create_anonymous(&remote, repo, argv[1]) < 0)
 			goto on_error;
 
@@ -76,16 +81,16 @@ int lg2_fetch(git_repository *repo, int argc, char **argv)
 	fetch_opts.callbacks.sideband_progress = &progress_cb;
 	fetch_opts.callbacks.transfer_progress = transfer_progress_cb;
 
-	fetch_opts.callbacks.certificate_check = certificate_confirm_cb;
 	fetch_opts.callbacks.credentials = cred_acquire_cb;
-	fetch_opts.callbacks.payload = repo; // Send repo to cb to get username/password or identityFile
+	fetch_opts.callbacks.certificate_check = certificate_confirm_cb;
+	fetch_opts.callbacks.payload = repo; // send repo to cb to get username/password or identityFile
 
 	/**
 	 * Perform the fetch with the configured refspecs from the
 	 * config. Update the reflog for the updated references with
-	 * "fetch".
+	 * "pull".
 	 */
-	if (git_remote_fetch(remote, NULL, &fetch_opts, "fetch") < 0)
+	if (git_remote_fetch(remote, NULL, &fetch_opts, "pull") < 0)
 		goto on_error;
 
 	/**
@@ -101,6 +106,13 @@ int lg2_fetch(git_repository *repo, int argc, char **argv)
 		printf("\rReceived %u/%u objects in %" PRIuZ "bytes\n",
 			stats->indexed_objects, stats->total_objects, stats->received_bytes);
 	}
+
+	/** Now we merge with current directory */
+	argv_merge[0] = "merge";
+	argv_merge[1] = "FETCH_HEAD";
+	lg2_merge(repo, 2, argv_merge);
+
+	/* Done */
 
 	git_remote_free(remote);
 
