@@ -1,8 +1,10 @@
 /build/
+/examples/build/
 .DS_Store
 *~
 .*.swp
 /tags
 CMakeSettings.json
 .vs
+.vscode
 .idea
