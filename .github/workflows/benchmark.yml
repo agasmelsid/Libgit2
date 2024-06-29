@@ -65,13 +65,13 @@ jobs:
     - name: Clone git repository
       uses: actions/checkout@v3
       with:
-        repository: https://github.com/git/git
+        repository: git/git
         path: resources/git
         fetch-depth: 0
     - name: Clone linux repository
       uses: actions/checkout@v3
       with:
-        repository: https://github.com/torvalds/linux
+        repository: torvalds/linux
         path: resources/linux
         fetch-depth: 0
     - name: Build
