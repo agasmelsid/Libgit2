@@ -62,18 +62,11 @@ jobs:
       run: source/ci/setup-${{ matrix.platform.setup-script }}-benchmark.sh
       shell: bash
       if: matrix.platform.setup-script != ''
-    - name: Clone git repository
-      uses: actions/checkout@v3
-      with:
-        repository: git/git
-        path: resources/git
-        fetch-depth: 0
-    - name: Clone linux repository
-      uses: actions/checkout@v3
-      with:
-        repository: torvalds/linux
-        path: resources/linux
-        fetch-depth: 0
+    - name: Clone resource repositories
+      run: |
+        mkdir resources
+        git clone --bare https://github.com/git/git resources/git
+        git clone --bare https://github.com/torvalds/linux resources/linux
     - name: Build
       run: |
         mkdir build && cd build
