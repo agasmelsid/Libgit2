@@ -74,8 +74,8 @@ jobs:
       shell: bash
     - name: Benchmark
       run: |
-        BENCHMARK_GIT_REPOSITORY="$(pwd)/resources/git"
-        BENCHMARK_LINUX_REPOSITORY="$(pwd)/resources/linux"
+        export BENCHMARK_GIT_REPOSITORY="$(pwd)/resources/git"
+        export BENCHMARK_LINUX_REPOSITORY="$(pwd)/resources/linux"
 
         if [[ "$(uname -s)" == MINGW* ]]; then
           GIT2_CLI="$(cygpath -w $(pwd))\\build\\Release\\git2"
