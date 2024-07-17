@@ -131,6 +131,7 @@ static int get_ssh_cmdline(
 	git_str ssh_cmd = GIT_STR_INIT;
 	const char *default_ssh_cmd = "ssh";
 	int error;
+	git_str port_str = GIT_STR_INIT;
 
 	/*
 	 * Safety check: like git, we forbid paths that look like an
@@ -158,9 +159,12 @@ static int get_ssh_cmdline(
 	else if ((error = git_config__get_string_buf(&ssh_cmd, cfg, "core.sshcommand")) < 0 && error != GIT_ENOTFOUND)
 		goto done;
 
-	error = git_str_printf(out, "%s -p %s \"%s%s%s\" \"%s\" \"%s\"",
+	if (url->port_specified && (error = git_str_printf(&port_str, "-p %s", url->port)) < 0)
+		goto done;
+
+	error = git_str_printf(out, "%s %s \"%s%s%s\" \"%s\" \"%s\"",
 		ssh_cmd.size > 0 ? ssh_cmd.ptr : default_ssh_cmd,
-		url->port,
+		port_str.ptr,
 		url->username ? url->username : "",
 		url->username ? "@" : "",
 		url->host,
@@ -168,6 +172,7 @@ static int get_ssh_cmdline(
 		url->path);
 
 done:
+	git_str_dispose(&port_str);
 	git_str_dispose(&ssh_cmd);
 	git_config_free(cfg);
 	return error;
