@@ -15,11 +15,17 @@
 
 #include "git2/transport.h"
 
+#include "../util/alloc.h"
+#include "../trace.h"
+
 #include "streams/socket.h"
 
 static int stransport_error(OSStatus ret)
 {
 	CFStringRef message;
+	char * message_c_str;
+	/* Use a boolean to track if we allocate a buffer for message_c_str that we need to free later. */
+	bool must_free = false;
 
 	if (ret == noErr || ret == errSSLClosedGraceful) {
 		git_error_clear();
@@ -30,11 +36,52 @@ static int stransport_error(OSStatus ret)
 	message = SecCopyErrorMessageString(ret, NULL);
 	GIT_ERROR_CHECK_ALLOC(message);
 
-	git_error_set(GIT_ERROR_NET, "SecureTransport error: %s", CFStringGetCStringPtr(message, kCFStringEncodingUTF8));
+	/* Attempt to cheaply convert the CoreFoundations string ref to a C-style null terminated string. */
+	message_c_str = (char *) CFStringGetCStringPtr(message, kCFStringEncodingUTF8);
+
+	/* 
+		CFStringGetCStringPtr can return null in some instances, where the message conversion is not cheap.
+		In these cases, it's more valuable to print the actual error message than to be cheap/efficient.
+		Call the (more expensive) 
+	*/
+	if (( must_free = (message_c_str == NULL) )) {
+		/* 
+			Before we allocate a buffer, get the size of the buffer we need to allocate (in bytes). 
+			CFStringGetLength gives us the number of UTF-16 code-pairs (16 bit characters) in the string. 
+			Multiply by 2 (since 2 8-bit bytes make a 16 bit char). Add one for the null terminator. 
+		*/
+		long buffer_size = CFStringGetLength(message) * 2 + 1;
+
+		/* Allocate the buffer. */
+		message_c_str = git__malloc((size_t) buffer_size);
+		GIT_ERROR_CHECK_ALLOC(message_c_str);
+		
+		/* 
+			Convert the string into a C string using the buffer. 
+			This returns a bool, which we check using this block. 
+			If getting the CString failed (unlikely) we return early.  
+		*/
+		if (!CFStringGetCString(message, message_c_str, buffer_size, kCFStringEncodingUTF8)) {
+			git_error_set(GIT_ERROR_NET, "CFStringGetCString error while handling a SecureTransport error");
+			git__free(message_c_str);
+			CFRelease(message);
+			return -1;
+		}
+	}
+
+	git_error_set(GIT_ERROR_NET, "SecureTransport error: %s", message_c_str);
+
+	/* If we decided earlier that we would have to free the buffer allocation, do that. */
+	if (must_free) {
+		git__free(message_c_str);
+	}
+
 	CFRelease(message);
 #else
 	git_error_set(GIT_ERROR_NET, "SecureTransport error: OSStatus %d", (unsigned int)ret);
 	GIT_UNUSED(message);
+	GIT_UNUSED(message_c_str);
+	GIT_UNUSED(must_free);
 #endif
 
 	return -1;
@@ -236,6 +283,18 @@ static ssize_t stransport_read(git_stream *stream, void *data, size_t len)
 	OSStatus ret;
 
 	if ((ret = SSLRead(st->ctx, data, len, &processed)) != noErr) {
+		/* 
+			This specific SecureTransport error is not well described by SecCopyErrorMessageString,
+			so we should at least log something to the user here so that they might see this if 
+			they're running into the same error I am and they have tracing enabled. 
+		*/
+		if (ret == -9806) {
+			git_trace(GIT_TRACE_FATAL, "SecureTransport error: SSLRead error: SSLRead returned -9806 (connection closed via error).");
+			git_trace(GIT_TRACE_FATAL, "This means that the remote terminated the SSL connection due to an error.");
+			git_trace(GIT_TRACE_FATAL, "This is *possibly* similar to https://stackoverflow.com/questions/26461966/osx-10-10-curl-post-to-https-url-gives-sslread-error");
+			git_trace(GIT_TRACE_FATAL, "You may find some valuable information running `security error -9806` (on macOS).");
+		}
+
 		if (st->error == GIT_TIMEOUT)
 			return GIT_TIMEOUT;
 
